@@ -547,8 +547,19 @@ def set_pg_timeouts(
         mesh.get_group()
         for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
     ] + [None]
+    set_timeout = getattr(torch.distributed, "set_timeout", None)
+    if set_timeout is None:
+        # Stable Neuron SDK 2.33.1 ships the older c10d API. It updates
+        # supported backends (e.g. Gloo) but cannot retime Neuron collectives.
+        set_timeout = c10d._set_pg_timeout
+        if device_type == "neuron":
+            warn_once(
+                logger,
+                "This PyTorch version keeps the initial timeout for Neuron "
+                "collectives; the training timeout applies only to supported backends.",
+            )
     for group in groups:
-        torch.distributed.set_timeout(timeout, group)
+        set_timeout(timeout, group)
 
 
 def _compute_grouped_norm_sq(

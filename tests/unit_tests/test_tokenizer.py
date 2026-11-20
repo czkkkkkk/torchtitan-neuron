@@ -429,6 +429,32 @@ class TestBaseTokenizerChatTemplate(unittest.TestCase):
             tok.apply_chat_template([])
         self.assertIn("messages cannot be empty", str(ctx.exception))
 
+    def test_generation_tag_renders_assistant_content(self):
+        tok = DummyTokenizer()
+        tok.set_chat_template(
+            "{% for m in messages %}{% if m.role == 'assistant' %}"
+            "{% generation %}{{ m.content }}{% endgeneration %}{% else %}"
+            "{{ m.content }}:{% endif %}{% endfor %}"
+        )
+        self.assertEqual(
+            tok.apply_chat_template(
+                [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": "a"},
+                ]
+            ),
+            "q:a",
+        )
+
+    def test_generation_tag_keeps_local_assignments(self):
+        tok = DummyTokenizer()
+        tok.set_chat_template(
+            "{% set marker = 'before' %}{% generation %}"
+            "{% set marker = 'inside' %}{{ marker }}{% endgeneration %}|{{ marker }}"
+        )
+        # The HF renderer scopes assignments to the generation block.
+        self.assertEqual(tok.apply_chat_template([{"role": "user"}]), "inside|before")
+
     def test_tojson_filter(self):
         """Test that tojson filter works in templates."""
         tok = DummyTokenizer()

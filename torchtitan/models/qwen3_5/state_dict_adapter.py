@@ -38,6 +38,10 @@ class Qwen35StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen35Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
+        self._include_vision = model_config.vision_encoder is not None
+        self._require_text_lm_head = (
+            not self._include_vision and not model_config.enable_weight_tying
+        )
 
         self.from_hf_map = {
             # ===== Language Model =====
@@ -245,16 +249,23 @@ class Qwen35StateDictAdapter(StateDictAdapter):
         """Convert HuggingFace Qwen3.5 state dict to torchtitan format."""
         tt_state_dict = {}
 
-        # HF ties lm_head with embed_tokens — copy if missing
+        # Only a tied checkpoint may omit the output projection.
         if "lm_head.weight" not in hf_state_dict:
+            if self._require_text_lm_head:
+                raise ValueError("Untied text checkpoint is missing lm_head.weight")
             embed_key = "model.language_model.embed_tokens.weight"
             if embed_key not in hf_state_dict:
                 raise ValueError(
                     f"HF checkpoint missing both 'lm_head.weight' and '{embed_key}'"
                 )
-            hf_state_dict["lm_head.weight"] = hf_state_dict[embed_key]
+            hf_state_dict = {
+                **hf_state_dict,
+                "lm_head.weight": hf_state_dict[embed_key],
+            }
 
         for hf_key, value in hf_state_dict.items():
+            if not self._include_vision and hf_key.startswith("model.visual."):
+                continue
             if re.search(r"\.\d+\.", hf_key):
                 hf_abstract_key = re.sub(r"(\d+)", "{}", hf_key, count=1)
                 # pyrefly: ignore [missing-attribute]

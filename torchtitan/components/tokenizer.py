@@ -67,10 +67,22 @@ class BaseTokenizer(ABC, Configurable):
 
             return datetime.now().strftime(fmt)
 
+        class GenerationBlock(jinja2.ext.Extension):
+            # HF templates mark assistant text for optional token loss masks.
+            # This tokenizer renders strings, so keep the text inside the block.
+            tags = {"generation"}
+
+            def parse(self, parser):
+                token = next(parser.stream)
+                body = parser.parse_statements(
+                    ("name:endgeneration",), drop_needle=True
+                )
+                return jinja2.nodes.Scope(body).set_lineno(token.lineno)
+
         env = jinja2.sandbox.ImmutableSandboxedEnvironment(
             trim_blocks=True,
             lstrip_blocks=True,
-            extensions=[jinja2.ext.loopcontrols],
+            extensions=[jinja2.ext.loopcontrols, GenerationBlock],
         )
         env.globals["raise_exception"] = raise_exception
         env.globals["strftime_now"] = strftime_now
