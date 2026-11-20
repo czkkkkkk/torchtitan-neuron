@@ -11,10 +11,6 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
-from fla.ops.gated_delta_rule import (
-    chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
-)
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
@@ -197,7 +193,9 @@ class GatedDeltaKernel(Module):
             return _torch_native_gated_delta(q, k, v, g, beta)
 
         if self.backend == "fla_chunked":
-            result = _fla_chunk_gated_delta_rule(
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+            result = chunk_gated_delta_rule(
                 q,
                 k,
                 v,
@@ -206,7 +204,9 @@ class GatedDeltaKernel(Module):
                 use_qk_l2norm_in_kernel=True,
             )
         elif self.backend == "fla_fused_recurrent":
-            result = _fla_fused_recurrent_gated_delta_rule(
+            from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
+
+            result = fused_recurrent_gated_delta_rule(
                 q,
                 k,
                 v,
@@ -541,7 +541,7 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        vision_encoder: Qwen35VisionEncoder.Config
+        vision_encoder: Qwen35VisionEncoder.Config | None
 
         def update_from_config(
             self,
@@ -594,8 +594,14 @@ class Qwen35Model(Decoder):
     def __init__(self, config: Config):
         super().__init__(config)
 
-        self.vision_encoder = config.vision_encoder.build()
-        self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+        self.vision_encoder = (
+            config.vision_encoder.build() if config.vision_encoder is not None else None
+        )
+        self.spatial_merge_size = (
+            config.vision_encoder.spatial_merge_size
+            if config.vision_encoder is not None
+            else None
+        )
 
     def _get_vision_positions(
         self,
@@ -647,6 +653,8 @@ class Qwen35Model(Decoder):
             merged_embeds: (num_items, max_tokens, dim) padded vision embeddings
             num_tokens_per_item: (num_items,) actual token count per item
         """
+        if self.vision_encoder is None:
+            raise ValueError("Visual inputs require a vision encoder")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         merged_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 
@@ -754,17 +762,23 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        if self.tok_embeddings is not None:
+        if self.tok_embeddings is None:
+            x = tokens  # Hidden states from the preceding pipeline stage.
+        elif pixel_values is None and pixel_values_videos is None:
+            x = self.tok_embeddings(tokens)
+        else:
+            if self.vision_encoder is None:
+                raise ValueError("Visual inputs require a vision encoder")
+            if special_tokens is None:
+                raise ValueError("Visual inputs require image and video token IDs")
             x = self._prepare_multimodal_embeds(
                 tokens,
                 pixel_values=pixel_values,
                 pixel_values_videos=pixel_values_videos,
                 grid_thw=grid_thw,
                 grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                special_tokens=special_tokens,
             )
-        else:
-            x = tokens
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
