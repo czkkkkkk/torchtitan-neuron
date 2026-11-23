@@ -27,6 +27,7 @@ torchtitan_neuron/
 - GPT-OSS NKI attention and MoE Trainer and GraphTrainer recipes.
 - Llama3 dense Trainer and SimpleFSDP GraphTrainer recipes.
 - Qwen3 dense/MXFP8 Trainer and NKI MoE Trainer/GraphTrainer recipes.
+- [Qwen3.8-27B text training](models/qwen3_8/README.md) with grouped-head GDN.
 - The shared `neuron_simple_fsdp` GraphTrainer converter.
 
 Select a recipe by passing its registry module and configuration name to the
