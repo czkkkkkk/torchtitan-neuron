@@ -5,13 +5,26 @@
 
 """Text decoder of Qwen3.8-27B for training on Trainium."""
 
+import os
 from typing import Any, cast
 
-from torchtitan.models.qwen3_5 import model_registry as core_model_registry
+from torchtitan.distributed import ParallelDims
+from torchtitan.models.qwen3_5 import (
+    model_registry as core_model_registry,
+    parallelize_qwen3_5,
+)
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .gdn import NeuronGatedDeltaKernel
+
+
+def parallelize_qwen38(model, *, parallel_dims: ParallelDims, **kwargs):
+    if parallel_dims.tp_enabled and parallel_dims.cp >= 4:
+        # The native all_to_all_v kernel requires aligned, contiguous groups.
+        # SDPA ring backward permutes equal-sized buffers across strided CP peers.
+        os.environ.setdefault("NEURON_USE_NKI_ALLTOALLV", "0")
+    return parallelize_qwen3_5(model, parallel_dims=parallel_dims, **kwargs)
 
 
 def model_registry(flavor: str = "27B", *, attn_backend: str = "sdpa") -> ModelSpec:
@@ -22,6 +35,7 @@ def model_registry(flavor: str = "27B", *, attn_backend: str = "sdpa") -> ModelS
         )
     spec = core_model_registry(flavor, attn_backend=attn_backend)
     spec.name = "qwen3_8"
+    spec.parallelize_fn = parallelize_qwen38
     model = cast(Qwen35Model.Config, spec.model)
     model.vision_encoder = None
     for layer in model.layers:

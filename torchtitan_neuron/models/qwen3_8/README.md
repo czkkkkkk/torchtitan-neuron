@@ -48,3 +48,25 @@ Trainium node with a visible `/dev/neuron0`.
 
 [`nki_gdn.py`](nki_gdn.py) registers the TorchTitan operators and their
 autograd rule. Both Schur kernels come from the installed nkilib.
+
+## Context-parallel training
+
+Set `--parallelism.context_parallel_degree 2` (or a higher divisor of the
+sequence length) with the `qwen38_27b` recipe. The recipe selects contiguous
+CP shards. The GDN layers all-gather projected convolution tails, then an FP32
+affine transition and additive state per local value head. The backward pass
+combines terminal cotangents in reverse sequence order. Local grouping of key
+and value heads follows TP. CP1 retains the zero-entry Schur kernel.
+
+The pinned NKI backward kernel accepts up to 49,152 local tokens at head width
+128. For example, CP2 at 65,536 global tokens fits that kernel limit. Total
+model memory and the full-attention backend also determine usable length.
+
+The Neuron port implements the contiguous, text-only case of [upstream
+state-based CP](https://github.com/pytorch/torchtitan/blob/b490c9ddcae2a1e6f4ee425c385e92ddaae43282/torchtitan/models/common/attention/cp_linear_attention.py)
+with the NKI Schur kernels. The full-attention layers use TorchTitan SDPA CP.
+At head width 256 the Neuron SDK uses its rank-dependent ring fallback. The
+trainer compiles the GDN blocks and dense FFNs inside the activation-checkpoint
+boundary and executes this ring eagerly.
+For TP with CP4 or greater the recipe defaults `NEURON_USE_NKI_ALLTOALLV` to
+`0`. The SDK's padded all-to-all supports these strided CP groups in ring backward.

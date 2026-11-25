@@ -634,7 +634,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         config = self.config
         world_size = dist_utils.init_distributed(
             config.comm,
-            enable_cpu_backend=config.training.enable_cpu_offload,
+            # DCP exchanges Python load plans on the world group. Keep that
+            # host metadata on Gloo, including when Neuron cores are permuted.
+            enable_cpu_backend=config.training.enable_cpu_offload
+            or (self.device.type == "neuron" and config.checkpoint.enable),
             base_folder=config.dump_folder,
         )
 
@@ -843,9 +846,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(
-                local_valid_tokens.to(self.device), batch_mesh
+            global_valid_tokens = dist_utils.dist_sum_batch_tokens(
+                local_valid_tokens.to(self.device), parallel_dims
             )
         else:
             global_valid_tokens = float(local_valid_tokens.item())
