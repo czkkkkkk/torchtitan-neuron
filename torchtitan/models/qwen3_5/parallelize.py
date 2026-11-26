@@ -11,6 +11,8 @@ This module applies PT-D parallelisms and various training techniques
 (activation checkpointing, compile, FSDP) to the Qwen3.5 model.
 """
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import fully_shard
@@ -31,6 +33,8 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+
+from .model import GatedDeltaKernel, Qwen35TransformerBlock
 
 
 def _apply_fsdp_to_vision_encoder(
@@ -84,11 +88,34 @@ def parallelize_qwen3_5(
     )
 
     if parallel_dims.cp_enabled:
-        raise NotImplementedError(
-            "Context Parallel is not yet supported for Qwen3.5. "
-            "GatedDeltaNet (75% of layers) requires full-sequence allgather, "
-            "and multimodal CP needs vision scatter before CP sharding."
-        )
+        from torchtitan.distributed.context_parallel import apply_cp_to_forward
+
+        layers = list(model.get_submodule("layers").children())
+        gdn_kernels = [
+            cast(GatedDeltaKernel, layer.get_submodule("attn.kernel"))
+            for layer in layers
+            if not layer.full_attn
+        ]
+        if model.vision_encoder is not None or any(
+            not kernel.supports_state_cp for kernel in gdn_kernels
+        ):
+            raise NotImplementedError(
+                "Hybrid CP requires a text decoder and a state-parallel GDN kernel"
+            )
+        if parallelism.context_parallel_load_balancer is not None:
+            raise ValueError(
+                "State-parallel GDN requires contiguous CP shards (context_parallel_load_balancer=None)"
+            )
+        mesh = parallel_dims.get_mesh("cp")
+        for kernel in gdn_kernels:
+            kernel.cp_mesh = mesh
+        attention = [
+            layer.get_submodule("attn.inner_attention")
+            for layer in layers
+            if layer.full_attn
+        ]
+        if attention:
+            apply_cp_to_forward(attention, mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
@@ -100,6 +127,28 @@ def parallelize_qwen3_5(
     if parallel_dims.tp_enabled:
         maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
+    regions = None
+    if (
+        model_compile_enabled
+        and parallel_dims.cp_enabled
+        and compile_config.backend == "neuron"
+    ):
+        # Compile inside the checkpoint boundary. Capturing checkpoint replay
+        # together with the stateful NKI call changes the recurrent gradients.
+        # SDPA's 256-wide fallback performs a different number of ring
+        # operations on each causal rank. Capturing it in a single NEFF
+        # produces incompatible collective signatures across CP peers.
+        blocks = (
+            cast(Qwen35TransformerBlock, block)
+            for block in model.get_submodule("layers").children()
+        )
+        regions = [
+            block.get_submodule("moe" if block.moe_enabled else "feed_forward")
+            if block.full_attn
+            else block
+            for block in blocks
+        ]
+
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
         ac_policy.apply(model)
@@ -107,7 +156,7 @@ def parallelize_qwen3_5(
             ac_policy.apply(model.vision_encoder)
 
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(model, compile_config, regions=regions)
         if model.vision_encoder is not None:
             # pyrefly: ignore [bad-argument-type]
             apply_compile(model.vision_encoder, compile_config)

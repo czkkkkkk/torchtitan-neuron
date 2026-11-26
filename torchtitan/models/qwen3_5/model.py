@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
@@ -170,6 +171,9 @@ class GatedDeltaKernel(Module):
             "fla_chunked", "fla_fused_recurrent", "torch_native"
         ] = "fla_chunked"
 
+    supports_state_cp = False
+    cp_mesh: DeviceMesh | None = None
+
     def __init__(self, config: Config):
         super().__init__()
         self.backend = config.backend
@@ -280,7 +284,18 @@ class GatedDeltaNet(Module):
         self.out_proj = config.out_proj.build()
 
     def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
-        x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
+        x = x.transpose(1, 2)
+
+        def pad(x_BCL):
+            width = self.conv_kernel_size - 1
+            if self.kernel.cp_mesh is None:
+                return F.pad(x_BCL, [width, 0])
+            from torchtitan.distributed.context_parallel import causal_conv_halo
+
+            return causal_conv_halo(
+                x_BCL, width, self.kernel.cp_mesh, self.kernel.local_cp_rank()
+            )
+
         if isinstance(x, DTensor):
             # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
             # groups lands in a released torch. local_map runs the conv on
@@ -294,7 +309,7 @@ class GatedDeltaNet(Module):
                 # groups == local out-channels (depthwise, channel-sharded)
                 # pyrefly: ignore [no-matching-overload]
                 return F.conv1d(
-                    x_local,
+                    pad(x_local),
                     w_local,
                     None,
                     conv.stride,
@@ -312,7 +327,7 @@ class GatedDeltaNet(Module):
             )
             x = conv_dt(x, w)  # pyrefly: ignore
         else:
-            x = conv(x)
+            x = conv(pad(x))
         return F.silu(x).transpose(1, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

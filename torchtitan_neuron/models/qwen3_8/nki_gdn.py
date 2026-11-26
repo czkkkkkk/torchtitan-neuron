@@ -72,3 +72,58 @@ def _vjp(ctx, grad_output, _grad_state):
 
 
 chunk_forward.register_autograd(_vjp, setup_context=_setup)
+
+
+@nki_op("torchtitan_neuron::gdn_state_forward", mutates_args={})
+def state_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    mask: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Schur aliases its FP32 recurrent_state argument to the terminal state.
+    # Keep the caller's entry state intact for activation recomputation and VJP.
+    return _forward[_grid](
+        q,
+        k,
+        v,
+        g,
+        beta,
+        recurrent_state=state.clone(),
+        scale=scale,
+        algorithm=gdn.ALGORITHM_SCHUR,
+        mask_pack=mask,
+    )
+
+
+@nki_op("torchtitan_neuron::gdn_state_backward", mutates_args={})
+def state_backward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    dy: torch.Tensor,
+    ds: torch.Tensor,
+    mask: torch.Tensor,
+    scale: float,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    return _backward[_grid](
+        q,
+        k,
+        v,
+        g,
+        beta,
+        dy,
+        mask,
+        recurrent_state=state,
+        d_state=ds,
+        scale=scale,
+    )

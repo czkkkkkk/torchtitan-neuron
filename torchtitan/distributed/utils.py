@@ -142,6 +142,18 @@ def dist_sum(
     )
 
 
+def dist_sum_batch_tokens(
+    local_tokens: torch.Tensor, parallel_dims: ParallelDims
+) -> float:
+    """Count valid tokens across data replicas before CP splits each batch."""
+    if local_tokens.device.type == "neuron" and parallel_dims.cp_enabled:
+        # DP-only groups can stride across both TP and CP in a topology that
+        # Trainium cannot reduce. The loss mesh includes every CP copy of
+        # the unsharded batch, so each DP rank contributes exactly cp times.
+        return dist_sum(local_tokens, parallel_dims.get_mesh("loss")) / parallel_dims.cp
+    return dist_sum(local_tokens, parallel_dims.get_mesh("batch"))
+
+
 def dist_mean(
     x: torch.Tensor,
     mesh: DeviceMesh | None = None,
@@ -280,6 +292,12 @@ def set_determinism(
         # We just need to pass the world_mesh as the device_id is the only information
         # this API uses.
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
+        if device.type == "neuron":
+            # DTensor assumes device index == global rank modulo local device
+            # count. Neuron workers may map ranks to cores for collective topology.
+            tracker = torch.distributed.tensor._random._rng_tracker
+            if tracker is not None:
+                tracker._device = device  # pyrefly: ignore [read-only]
 
 
 _batch_invariant_enabled: bool = False

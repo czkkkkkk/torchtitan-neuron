@@ -303,3 +303,20 @@ def cp_shard(
         )
 
     return inputs, attention_masks
+
+
+def causal_conv_halo(
+    x_BCL: torch.Tensor, width: int, mesh: DeviceMesh, rank: torch.Tensor
+) -> torch.Tensor:
+    """Prepend the previous tokens' projected channels on contiguous CP shards."""
+    from torch.distributed._functional_collectives import all_gather_single_autograd
+
+    if width == 0:
+        return x_BCL
+    size = min(width, x_BCL.shape[-1])
+    # Gather only the tail, including for batches with shorter shards than the halo.
+    tail_LBC = x_BCL[..., -size:].permute(2, 0, 1).contiguous()
+    tails_BCL = all_gather_single_autograd(tail_LBC, 0, mesh).permute(1, 2, 0)
+    history_BCL = torch.nn.functional.pad(tails_BCL, (width, 0))
+    positions = torch.arange(width, dtype=rank.dtype, device=x_BCL.device) + rank * size
+    return torch.cat((history_BCL.index_select(-1, positions), x_BCL), -1)

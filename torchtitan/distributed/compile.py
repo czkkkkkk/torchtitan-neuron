@@ -6,7 +6,7 @@
 # Licensed under the BSD-3-Clause license.
 
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.fx.traceback as fx_traceback
@@ -33,10 +33,14 @@ FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
 _regional_inductor_enabled: bool = False
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig) -> None:
+def apply_compile(
+    model: nn.Module,
+    compile_config: CompileConfig,
+    *,
+    regions: Iterable[nn.Module] | None = None,
+) -> None:
     """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    Compile the supplied regions, defaulting to each repeated TransformerBlock.
     """
     # Needed for torch.compile to handle data-dependent dynamic shapes in
     # token-choice MoE dispatch. Harmless for dense models.
@@ -50,11 +54,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig) -> None:
 
     backend = _maybe_regional_inductor_backend(model, compile_config.backend)
 
-    # pyrefly: ignore [missing-attribute]
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block.compile(backend=backend, fullgraph=True)
+    if regions is None:
+        regions = model.get_submodule("layers").children()
+    for region in regions:
+        region.compile(backend=backend, fullgraph=True)
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+    logger.info("Applied torch.compile to decoder regions")
 
 
 def _maybe_regional_inductor_backend(model: nn.Module, backend: str) -> str | Callable:

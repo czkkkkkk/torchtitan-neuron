@@ -252,9 +252,8 @@ class Validator(BaseValidator):
 
             # All-reduce token count across DP ranks to get global token count
             if parallel_dims.dp_enabled:
-                batch_mesh = parallel_dims.get_mesh("batch")
-                global_valid_tokens = dist_utils.dist_sum(
-                    local_valid_tokens, batch_mesh, None
+                global_valid_tokens = dist_utils.dist_sum_batch_tokens(
+                    local_valid_tokens, parallel_dims
                 )
             else:
                 global_valid_tokens = float(local_valid_tokens.item())

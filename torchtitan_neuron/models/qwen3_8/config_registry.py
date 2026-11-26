@@ -19,6 +19,7 @@ def qwen38_27b() -> Trainer.Config:
     config.compile = CompileConfig(enable=True, backend="neuron")
     config.optimizer.implementation = "for-loop"
     config.parallelism.enable_sequence_parallel = False
+    config.parallelism.context_parallel_load_balancer = None
     config.training.local_batch_size = 1
     config.training.seq_len = 512
     config.hf_assets_path = "./assets/hf/Qwen3.8-27B"
